@@ -29,95 +29,95 @@ make ARCH=x86_64 menuconfig
 
 既然是学习 kernel， 那肯定需要编译带 debug 的 kernel，在 menu 里面选择
 
+```text
+kernel hacking ->  Compile-time checks and compiler options -> Compile the kernel with debug info
+kernel hacking ->  Compile-time checks and compiler options -> Provide GDB scripts for kernel debugging
+```
 
-在 kernel hacking ->  Compile-time checks and compiler options
-选择 Compile the kernel with debug info & Provide GDB scripts for kernel debugging
+至此就可以进行编译了，当 kernel 编译完成后， 会用到如下两个文件
 
-至此就可以进行编译了。
+```text
+root of kernel
+├──vmlinux 
+└──arch/x86_64/boot/bzImage
+```
+
+接下来我们就可以启动 kernel 了
+
+```bash
+emu-system-x86_64 -s -S -no-kvm -kernel arch/x86/boot/bzImage -hda /dev/zero -append "root=/dev/zero console=ttyS0 nokaslr" -serial stdio -display none
+```
+
+`-s -S` 代表进入 debug 模式， 并且等待 gdb attach 到 qemu， 默认 qemu debug 端口在 1234
+
+在另一个终端中运行 `gdb vmlinux`
+
+```bash
+(gdb) target remote :1234
+Remote debugging using :1234
+0x000000000000fff0 in entry_stack_storage ()
+(gdb) b start_kernel
+Breakpoint 1 at 0xffffffff82652b51: file init/main.c, line 576.
+(gdb) c
+Continuing.
+
+Breakpoint 1, start_kernel () at init/main.c:576
+576     {
+(gdb) bt
+#0  start_kernel () at init/main.c:576
+#1  0xffffffff810000e6 in secondary_startup_64 () at arch/x86/kernel/head_64.S:241
+#2  0x0000000000000000 in ?? ()
+(gdb) l
+571     {
+572             rest_init();
+573     }
+574
+575     asmlinkage __visible void __init start_kernel(void)
+576     {
+577             char *command_line;
+578             char *after_dashes;
+579
+580             set_task_stack_end_magic(&init_task);
+(gdb)
+```
+
+至此可以完成对 kernel 启动时的断点调试，但由于没有文件系统挂载，kernel 启动完就会 panic。
 
 ### buildroot
+
+buildroot 是一个创建 rootfs 的工具，可以打包全部的 kernel 并构建 rootfs。
 
 ```bash
 git clone git://git.buildroot.net/buildroot
 make menuconfig
 ```
 
-在 Target Options -> Target Architecture 中选择 x86_64 架构
-同时在 Filesystem images -> ext2/3/4 root file system 中选择 ext4
-将 kernel 的 upstream 与上面步骤的地址设置成一样的，并且分支也要一样
+```text
+Target Options -> Target Architecture -> X86_64
+Filesystem images -> ext2/3/4 root file system -> ext4
+```
 
-因为我这次针对 VFS 进行学习，在此用 [黄老师](https://github.com/jserv/simplefs) 的 simplefs 进行实验，因此需要额外配置其他的 ko。
+以上步骤将配置目标环境为 x86 架构，文件系统为 ext4。
 
-配置共分为以下步骤
+之后运行编译即可，编译生成的文件在 `buildroot/outputs/images/rootfs.ext4`
 
-首先生成 simplefs 的 menuconfig，注意 `BR2_PACKAGE_` 这个前缀是必须的。
+运行 qemu
 
 ```bash
-cd buildroot
-mkdir package/simplefs
-cat << EOF > package/simplefs/Config.in
-config BR2_PACKAGE_SIMPLEFS
-       bool "simpefs"
-       help
-               Simplefs ko.
-EOF
+qemu-system-x86_64 -kernel path-to-kernel/arch/x86/boot/bzImage \
+-boot c -m 2049M -hda path-to-buildroot/output/images/rootfs.ext4 \
+-append "root=/dev/sda rw console=ttyS0,115200 acpi=off nokaslr" \
+-serial stdio -display none
 ```
 
-之后编写 `package/simplefs/simplefs.mk`
-
-`SIMPLEFS_SITE` 为外部依赖的项目路径， 注意填写 `SIMPLEFS_SITE` 时 cwd 为 buildroot，其中，我的目录结构如下，因此为 `../simplefs`
+如果没有问题，会看到很多 boot 启动的日志，进入登录终端
 
 ```text
-.
-├── [Dec  1 20:52]  buildroot
-├── [Dec  1 20:46]  linux-next
-└── [Dec  1 20:10]  simplefs                                                               
-```
-```shell
-cat << EOF > package/simplefs/simplefs.mk
-SIMPLEFS_VERSION = 1.0
-SIMPLEFS_SITE = ../simplefs
-SIMPLEFS_SITE_METHOD = local
-define KERNEL_MODULE_BUILD_CMDS
-        $(MAKE) -C '$(@D)' LINUX_DIR='$(LINUX_DIR)' CC='$(TARGET_CC)' LD='$(TARGET_LD)' modules
-endef 
-$(eval $(kernel-module))
-$(eval $(generic-package))
-EOF
+.....
+Welcome to Buildroot
+buildroot login:
 ```
 
+用户 root，没有密码，就可以登入 kernel 了，此时在 gdb 中可以做各种断点调试。
 
-对 simplefs 里面的修改如下
-
-```git
-diff --git a/Makefile b/Makefile
-index 3598587..43b3e42 100644
---- a/Makefile
-+++ b/Makefile
-@@ -1,12 +1,13 @@
- obj-m += simplefs.o
-+ccflags-y := -DDEBUG -g -std=gnu99 -Wno-declaration-after-statement
- simplefs-objs := fs.o super.o inode.o file.o dir.o extent.o
--KDIR ?= /lib/modules/$(shell uname -r)/build
- MKFS = mkfs.simplefs
- all: $(MKFS)
--       make -C $(KDIR) M=$(PWD) modules
-+       $(MAKE) -C '$(LINUX_DIR)' M='$(PWD)' modules
-+
- IMAGE ?= test.img
- IMAGESIZE ?= 50
-```
-
-运行 make menuconfig， 如果没有任何错误的话，在 `Target packages`最下面会出现 simplefs 选项，开启它
-
-![](https://raw.githubusercontent.com/cos120/learn_kernel/main/env_set/simplefs_menu.png)
-
-最后运行编译，时间会很长
-
-```shell
-make -j $(($(nproc) - 1))
-```
-
-## GDB 配置
-
-TBD
+`但由于 buildroot 不能使用系统自带的 toolchain，因此用该种方式编译的 rootfs 可能导致编译的一些功能失效。`
